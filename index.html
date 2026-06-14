@@ -34,10 +34,15 @@
     <div id="logo">✓</div>
     <div id="title">IsuUp 화상교실</div>
     <span id="status"></span>
-    <button id="capBtn" class="btn btn-cap" style="display:none">📸 전체 화면 캡처</button>
+    <button id="capBtn" class="btn btn-cap" style="display:none" title="전체 참가자+참여자 목록을 한 장으로 캡처(이수확인서 첨부)">📸 전체 화면 캡처</button>
     <button id="outBtn" class="btn btn-out">⨯ 나가기</button>
   </div>
   <div id="meet"></div>
+  <!-- 참여자 목록 오버레이 (캡처에 함께 담김) -->
+  <div id="plist" style="display:none;position:absolute;top:64px;right:10px;width:188px;max-height:60%;overflow:auto;z-index:6;background:rgba(7,11,26,0.82);border:1px solid rgba(45,212,191,0.4);border-radius:12px;padding:10px 12px;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)">
+    <div style="font-size:12px;font-weight:800;color:#2dd4bf;margin-bottom:6px">👥 참여자 <span id="pcount">0</span>명</div>
+    <div id="pnames" style="font-size:12px;line-height:1.75;color:#e8edff"></div>
+  </div>
   <div id="msg">화상교실에 연결 중…</div>
   <div id="perm" style="display:none">📷 브라우저가 카메라·마이크 사용을 물으면 <b>허용</b>을 눌러주세요.</div>
 
@@ -83,14 +88,36 @@
   });
   try { var ifr = api.getIFrame && api.getIFrame(); if (ifr) ifr.setAttribute('allow','camera; microphone; display-capture; autoplay; clipboard-write'); } catch(e){}
 
-  var capTimer = null, left = false;
+  var capTimer = null, left = false, fullCaptured = false, myId = '';
 
-  api.addEventListener('videoConferenceJoined', function () {
+  // 참여자 목록 오버레이 갱신 (교사+학생 전원)
+  var elPList = document.getElementById('plist'), elPCount = document.getElementById('pcount'), elPNames = document.getElementById('pnames');
+  function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function renderParticipants(){
+    try {
+      var ps = api.getParticipantsInfo ? (api.getParticipantsInfo() || []) : [];
+      elPCount.textContent = ps.length;
+      elPNames.innerHTML = ps.map(function(p){
+        var nm = p.displayName || p.formattedDisplayName || '참가자';
+        var me = (p.participantId && p.participantId === myId);
+        return '<div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (me ? '🟢 ' : '• ') + esc(nm) + '</div>';
+      }).join('');
+      elPList.style.display = ps.length ? 'block' : 'none';
+    } catch(e){}
+  }
+  api.addEventListener('participantJoined', renderParticipants);
+  api.addEventListener('participantLeft', renderParticipants);
+  api.addEventListener('displayNameChange', renderParticipants);
+  setInterval(renderParticipants, 5000);   // 안전망(이벤트 누락 대비)
+
+  api.addEventListener('videoConferenceJoined', function (ev) {
+    try { myId = (ev && ev.id) || ''; } catch(e){}
+    renderParticipants();
     if (isHost) {
       capBtn.style.display = '';
       try { api.executeCommand('setTileView', true); } catch(e){}
-      setStatus('수업 진행 중');
-      setTimeout(hostCapture, 45000);   // 입장 45초 후 자동 전체화면 캡처
+      setStatus('수업 진행 중 · 📸로 전체 화면 캡처');
+      setTimeout(hostCapture, 45000);   // 45초 후 자동(부분) 캡처 — 이후 📸 누르면 전체 캡처로 덮어씀
     } else {
       record('joinLiveSession', { studentId:STUDENT_ID, studentName:NAME, dept:DEPT, grade:GRADE, cls:CLS });
       setStatus('✓ 출석이 기록되었습니다');
@@ -99,16 +126,46 @@
   });
   api.addEventListener('readyToClose', leave);
 
+  // 자동(부분) 캡처 — captureLargeVideoScreenshot은 대표 영상만 담김(전체 격자 불가).
+  // 교사가 📸(전체 탭 캡처)를 누르면 더 정확한 전체 화면으로 덮어씀.
   function hostCapture(){
+    if (fullCaptured) return;   // 이미 전체 캡처했으면 부분 캡처로 덮어쓰지 않음
     try { api.executeCommand('setTileView', true); } catch(e){}
     setTimeout(function(){
       try {
         api.captureLargeVideoScreenshot().then(function(r){
-          if (r && r.dataURL){ record('saveLiveScreenshot', { studentId:'CLASS', scope:'session', base64:r.dataURL }); setStatus('✓ 전체 화면 캡처 완료(이수확인서 첨부)'); }
-          else setStatus('캡처할 화면이 없습니다(참가자 영상 필요)');
+          if (fullCaptured) return;
+          if (r && r.dataURL){ record('saveLiveScreenshot', { studentId:'CLASS', scope:'session', base64:r.dataURL }); }
         }).catch(function(){});
       } catch(e){}
     }, 1200);
+  }
+
+  // 전체 화면 캡처 — 화면공유(getDisplayMedia)로 탭 전체(전체 참가자 타일 + 교사 + 참여자 목록)를 한 장으로
+  async function captureTabFull(){
+    try { api.executeCommand('setTileView', true); } catch(e){}
+    renderParticipants();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      setStatus('이 브라우저는 전체 캡처 미지원 → 부분 캡처로 대체'); return hostCapture();
+    }
+    setStatus('「이 탭」 공유를 허용하면 전체 화면을 캡처합니다…');
+    var stream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({ video: { displaySurface:'browser' }, audio:false, preferCurrentTab:true });
+    } catch(e){ setStatus('화면 캡처가 취소되었습니다. 📸 버튼으로 다시 시도하세요.'); return; }
+    try {
+      var v = document.createElement('video'); v.srcObject = stream; v.muted = true;
+      await v.play();
+      await new Promise(function(r){ setTimeout(r, 450); });   // 첫 프레임 안정화
+      var cw = v.videoWidth || 1280, ch = v.videoHeight || 720;
+      var cv = document.createElement('canvas'); cv.width = cw; cv.height = ch;
+      cv.getContext('2d').drawImage(v, 0, 0, cw, ch);
+      var dataUrl = cv.toDataURL('image/jpeg', 0.85);
+      record('saveLiveScreenshot', { studentId:'CLASS', scope:'session', base64:dataUrl });
+      fullCaptured = true;
+      setStatus('✓ 전체 화면 캡처 완료 (전체 참가자 + 참여자 목록 → 이수확인서)');
+    } catch(e){ setStatus('캡처 처리 중 오류가 발생했습니다.'); }
+    finally { try { stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){} }
   }
   function stuCaptureTiled(){
     try { api.executeCommand('setTileView', true); } catch(e){}
@@ -136,7 +193,7 @@
     }
   });
 
-  capBtn.addEventListener('click', hostCapture);
+  capBtn.addEventListener('click', captureTabFull);
   outBtn.addEventListener('click', leave);
 })();
 </script>
