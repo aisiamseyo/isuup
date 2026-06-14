@@ -105,7 +105,16 @@
       elPList.style.display = ps.length ? 'block' : 'none';
     } catch(e){}
   }
-  api.addEventListener('participantJoined', renderParticipants);
+  // 참가자 입장 시: 목록 갱신 + (호스트) 학생 입장마다 자동 캡처(디바운스). 교사 수동 캡처(전체) 이후엔 멈춤.
+  var _joinCapTimer = null;
+  function _onParticipantJoined(){
+    renderParticipants();
+    if (isHost && !fullCaptured) {
+      if (_joinCapTimer) clearTimeout(_joinCapTimer);
+      _joinCapTimer = setTimeout(function(){ if (!fullCaptured) hostCapture(); }, 4000);
+    }
+  }
+  api.addEventListener('participantJoined', _onParticipantJoined);
   api.addEventListener('participantLeft', renderParticipants);
   api.addEventListener('displayNameChange', renderParticipants);
   setInterval(renderParticipants, 5000);   // 안전망(이벤트 누락 대비)
@@ -200,9 +209,32 @@
     setStatus('전체 참가자 캡처 중… (잠시 화면이 전환됩니다)');
     try {
       var durl = await captureGridComposite();
-      if (durl){ record('saveLiveScreenshot', { studentId:'CLASS', scope:'session', base64:durl }); fullCaptured = true; setStatus('✓ 전체 참가자 캡처 완료 (이수확인서 첨부)'); }
-      else setStatus('캡처할 화면이 없습니다(참가자 영상 필요).');
+      if (durl){
+        record('saveLiveScreenshot', { studentId:'CLASS', scope:'session', base64:durl });
+        fullCaptured = true;                       // 이후 자동 캡처가 덮어쓰지 않음 → 이 수동 캡처가 최종
+        setStatus('✓ 전체 참가자 캡처 완료 (이수확인서 첨부)');
+        showCapPreview(durl);                       // 캡처 결과 팝업 미리보기
+      } else setStatus('캡처할 화면이 없습니다(참가자 영상 필요).');
     } catch(e){ setStatus('캡처 처리 중 오류. 📸로 다시 시도해주세요.'); }
+  }
+  // 수동 캡처 결과 팝업 미리보기
+  function showCapPreview(dataUrl){
+    var ov = document.getElementById('capPreview');
+    if (!ov){
+      ov = document.createElement('div'); ov.id = 'capPreview';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:50;background:rgba(0,0,0,0.78);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;padding:18px';
+      document.body.appendChild(ov);
+    }
+    ov.innerHTML =
+      '<div style="color:#fff;font-weight:800;font-size:15px">✓ 캡처 완료 — 이수확인서에 첨부됩니다 (최종 사진)</div>' +
+      '<img src="' + dataUrl + '" style="max-width:92%;max-height:74vh;border:2px solid #2dd4bf;border-radius:10px;box-shadow:0 12px 40px rgba(0,0,0,0.5)">' +
+      '<div style="display:flex;gap:10px">' +
+        '<button id="_capAgain" style="padding:10px 20px;border:1px solid rgba(255,255,255,0.3);border-radius:10px;background:rgba(255,255,255,0.08);color:#fff;font-weight:700;cursor:pointer">다시 캡처</button>' +
+        '<button id="_capClose" style="padding:10px 26px;border:none;border-radius:10px;background:#2dd4bf;color:#06231f;font-weight:800;cursor:pointer">닫기</button>' +
+      '</div>';
+    ov.style.display = 'flex';
+    document.getElementById('_capClose').onclick = function(){ ov.style.display = 'none'; };
+    document.getElementById('_capAgain').onclick = function(){ ov.style.display = 'none'; captureTabFull(); };
   }
   function stuCaptureTiled(){
     try { api.executeCommand('setTileView', true); } catch(e){}
