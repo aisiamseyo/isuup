@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IsuUp 화상교실</title>
+<script src="https://meet.jit.si/external_api.js"></script>
+<style>
+  :root { --bg:#070b1a; --teal:#2dd4bf; --violet:#a78bfa; --txt:#e8edff; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--txt);
+    font-family:'Pretendard','Apple SD Gothic Neo','Malgun Gothic',sans-serif; overflow:hidden; }
+  #bar { height:56px; display:flex; align-items:center; gap:12px; padding:0 16px;
+    background:linear-gradient(90deg,rgba(45,212,191,0.14),rgba(167,139,250,0.10));
+    border-bottom:1px solid rgba(255,255,255,0.08); }
+  #logo { width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--teal),var(--violet));
+    display:flex;align-items:center;justify-content:center;font-size:18px;color:#06231f;font-weight:800;flex-shrink:0; }
+  #title { font-size:15px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis; }
+  #status { font-size:12px;color:var(--teal);font-weight:600;white-space:nowrap; }
+  .btn { border:none;border-radius:10px;padding:9px 14px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit; }
+  .btn-cap { background:rgba(45,212,191,0.18);color:var(--teal);border:1px solid rgba(45,212,191,0.4); }
+  .btn-out { background:rgba(239,68,68,0.16);color:#f87171;border:1px solid rgba(239,68,68,0.35); }
+  #meet { position:absolute; top:56px; left:0; right:0; bottom:0; }
+  #meet iframe { width:100%; height:100%; border:0; }
+  #msg { position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); text-align:center;
+    color:rgba(255,255,255,0.6); font-size:15px; line-height:1.7; }
+  #perm { position:absolute; left:50%; bottom:18px; transform:translateX(-50%); z-index:5;
+    background:rgba(45,212,191,0.92); color:#06231f; font-size:13px; font-weight:700;
+    padding:9px 16px; border-radius:12px; box-shadow:0 8px 24px -8px rgba(0,0,0,0.5); }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <div id="logo">✓</div>
+    <div id="title">IsuUp 화상교실</div>
+    <span id="status"></span>
+    <button id="capBtn" class="btn btn-cap" style="display:none">📸 전체 화면 캡처</button>
+    <button id="outBtn" class="btn btn-out">⨯ 나가기</button>
+  </div>
+  <div id="meet"></div>
+  <div id="msg">화상교실에 연결 중…</div>
+  <div id="perm" style="display:none">📷 브라우저가 카메라·마이크 사용을 물으면 <b>허용</b>을 눌러주세요.</div>
+
+<script>
+(function () {
+  function qp(k){ try { return new URLSearchParams(location.search).get(k) || ''; } catch(e){ return ''; } }
+  var BACKEND = qp('backend'), TOKEN = qp('token'), SC = qp('sc'), SID = qp('sid'),
+      ROOM = qp('room'), ROLE = qp('role'), NAME = qp('name'),
+      STUDENT_ID = qp('studentId'), DEPT = qp('dept'), GRADE = qp('grade'), CLS = qp('cls'),
+      SUBJECT = qp('subject'), TITLE = qp('title');
+  var isHost = (ROLE === 'host');
+
+  var elTitle = document.getElementById('title'), elStatus = document.getElementById('status'),
+      elMsg = document.getElementById('msg'), elPerm = document.getElementById('perm'),
+      capBtn = document.getElementById('capBtn'), outBtn = document.getElementById('outBtn');
+
+  elTitle.textContent = (TITLE || 'IsuUp 화상교실') + (SUBJECT ? (' — ' + SUBJECT) : '');
+  function setStatus(t){ elStatus.textContent = t; }
+
+  // GAS 백엔드로 기록 (no-cors fire-and-forget: 응답은 못 읽지만 서버 기록은 실행됨)
+  function record(action, extra){
+    if (!BACKEND) return;
+    var body = JSON.stringify(Object.assign({ action:action, token:TOKEN, schoolCode:SC, sessionId:SID }, extra || {}));
+    try {
+      fetch(BACKEND, { method:'POST', mode:'no-cors', headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body: body }).catch(function(){});
+    } catch(e){}
+  }
+
+  if (typeof JitsiMeetExternalAPI === 'undefined' || !ROOM) {
+    elMsg.innerHTML = '화상 모듈을 불러오지 못했습니다.<br>네트워크 확인 후 새로고침하거나, 관리자에게 교실 주소를 확인하세요.';
+    return;
+  }
+  elMsg.style.display = 'none';
+  elPerm.style.display = 'block';
+  setTimeout(function(){ elPerm.style.display = 'none'; }, 9000);
+
+  var api = new JitsiMeetExternalAPI('meet.jit.si', {
+    roomName: ROOM,
+    parentNode: document.getElementById('meet'),
+    userInfo: { displayName: NAME || (isHost ? '교사' : '학생') },
+    configOverwrite: { prejoinPageEnabled:false, disableDeepLinking:true, startWithAudioMuted:!isHost, startWithVideoMuted:false },
+    interfaceConfigOverwrite: { MOBILE_APP_PROMO:false }
+  });
+  try { var ifr = api.getIFrame && api.getIFrame(); if (ifr) ifr.setAttribute('allow','camera; microphone; display-capture; autoplay; clipboard-write'); } catch(e){}
+
+  var capTimer = null, left = false;
+
+  api.addEventListener('videoConferenceJoined', function () {
+    if (isHost) {
+      capBtn.style.display = '';
+      try { api.executeCommand('setTileView', true); } catch(e){}
+      setStatus('수업 진행 중');
+      setTimeout(hostCapture, 45000);   // 입장 45초 후 자동 전체화면 캡처
+    } else {
+      record('joinLiveSession', { studentId:STUDENT_ID, studentName:NAME, dept:DEPT, grade:GRADE, cls:CLS });
+      setStatus('✓ 출석이 기록되었습니다');
+      capTimer = setTimeout(stuCaptureTiled, 30000);
+    }
+  });
+  api.addEventListener('readyToClose', leave);
+
+  function hostCapture(){
+    try { api.executeCommand('setTileView', true); } catch(e){}
+    setTimeout(function(){
+      try {
+        api.captureLargeVideoScreenshot().then(function(r){
+          if (r && r.dataURL){ record('saveLiveScreenshot', { studentId:'CLASS', scope:'session', base64:r.dataURL }); setStatus('✓ 전체 화면 캡처 완료(이수확인서 첨부)'); }
+          else setStatus('캡처할 화면이 없습니다(참가자 영상 필요)');
+        }).catch(function(){});
+      } catch(e){}
+    }, 1200);
+  }
+  function stuCaptureTiled(){
+    try { api.executeCommand('setTileView', true); } catch(e){}
+    setTimeout(function(){
+      try { api.captureLargeVideoScreenshot().then(function(r){ if (r && r.dataURL) record('saveLiveScreenshot', { studentId:STUDENT_ID, base64:r.dataURL }); }).catch(function(){}); } catch(e){}
+    }, 1200);
+  }
+
+  function leave(){
+    if (left) return; left = true;
+    if (capTimer) clearTimeout(capTimer);
+    if (!isHost){ try { stuCaptureTiled(); } catch(e){} record('leaveLiveSession', { studentId:STUDENT_ID }); }
+    try { api.dispose(); } catch(e){}
+    setStatus('수업에서 나갔습니다');
+    setTimeout(function(){ try { window.close(); } catch(e){} try { location.href = 'about:blank'; } catch(e){} }, 700);
+  }
+
+  // 창 닫힘/새로고침 시 퇴장 기록 (sendBeacon = 언로드 중에도 전송 보장)
+  window.addEventListener('pagehide', function(){
+    if (!isHost && !left){
+      try {
+        var body = JSON.stringify({ action:'leaveLiveSession', token:TOKEN, schoolCode:SC, sessionId:SID, studentId:STUDENT_ID });
+        if (navigator.sendBeacon) navigator.sendBeacon(BACKEND, new Blob([body], { type:'text/plain;charset=utf-8' }));
+      } catch(e){}
+    }
+  });
+
+  capBtn.addEventListener('click', hostCapture);
+  outBtn.addEventListener('click', leave);
+})();
+</script>
+</body>
+</html>
